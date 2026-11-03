@@ -3,8 +3,13 @@ import express, { type Request, type Response } from 'express';
 import cors from 'cors';
 import { type ClientDiscoveryInput } from './types/index.js';
 import { generatePRDFromAI } from './services/ai.service.js';
+import { connectDB } from './config/db.js';
 
 const app = express();
+
+// Initialize Database
+await connectDB();
+
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
