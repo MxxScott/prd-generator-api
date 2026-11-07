@@ -12,7 +12,7 @@ export async function generatePRDFromAI(input: ClientDiscoveryInput): Promise<PR
   const genAI = new GoogleGenerativeAI(apiKey);
 
   const model = genAI.getGenerativeModel({
-    model: 'gemini-flash-latest',
+    model: 'gemini-3.5-flash',
     generationConfig: {
       responseMimeType: "application/json",
       responseSchema: {
@@ -60,6 +60,7 @@ export async function generatePRDFromAI(input: ClientDiscoveryInput): Promise<PR
   console.log('Sending prompt to Gemini...');
   const result = await model.generateContent(prompt);
   const responseText = result.response.text();
+  console.log('PRD Generated Successfully✔');
   
   return JSON.parse(responseText) as PRDDocument;
 }
