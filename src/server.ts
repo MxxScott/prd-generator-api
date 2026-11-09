@@ -2,10 +2,11 @@ import 'dotenv/config';
 import express, { type Request, type Response } from 'express';
 import cors from 'cors';
 import { type ClientDiscoveryInput } from './types/index.js';
-import { generatePRDFromAI } from './services/ai.service.js';
 import { connectDB } from './config/db.js';
 import { PRDModel } from './models/prd.model.js';
 import { generateMarkdownPRD } from './utils/markdown.util.js';
+import { ProjectModel } from './models/project.model.js';
+import { generatePRDFromAI, auditProjectWithAI } from './services/ai.service.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -18,6 +19,179 @@ await connectDB();
 
 app.get('/api/health', (req: Request, res: Response) => {
   res.status(200).json({ status: 'API is running perfectly.' });
+});
+
+// POST: Phase 1 - Create a new Project Draft
+app.post('/api/projects', async (req: Request, res: Response) => {
+  try {
+    const { projectName, clientName, projectGoal, targetAudience, designPreferences, coreFeaturesRequired } = req.body;
+
+    // Basic validation to ensure the form isn't completely empty
+    if (!projectName || !clientName) {
+      return res.status(400).json({ error: 'Project Name and Client Name are required to start a draft.' });
+    }
+
+    // Save the raw intake data as a DRAFT
+    const newProject = await ProjectModel.create({
+      status: 'DRAFT',
+      tier: 'FREE', // We default to FREE until you build a Stripe/Paywall integration
+      intakeData: {
+        projectName,
+        clientName,
+        projectGoal: projectGoal || '',
+        targetAudience: targetAudience || '',
+        designPreferences: designPreferences || { themeStyle: 'Undecided' },
+        coreFeaturesRequired: Array.isArray(coreFeaturesRequired) ? coreFeaturesRequired : []
+      }
+    });
+
+    res.status(201).json({
+      message: 'Project draft created successfully.',
+      projectId: newProject._id,
+      status: newProject.status
+    });
+  } catch (error) {
+    console.error('Error creating project draft:', error);
+    res.status(500).json({ error: 'Internal server error while saving draft.' });
+  }
+});
+
+// POST: Phase 2 - Trigger AI Audit (The Upsell)
+app.post('/api/projects/:id/audit', async (req: Request<{ id: string }>, res: Response) => {
+  try {
+    const project = await ProjectModel.findById(req.params.id);
+
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found.' });
+    }
+
+    if (project.status !== 'DRAFT') {
+      return res.status(400).json({ error: 'Only DRAFT projects can be audited.' });
+    }
+
+    console.log(`Auditing project: ${project.intakeData.projectName}...`);
+
+    // 1. Ask Gemini to review the draft
+    const suggestions = await auditProjectWithAI(project.intakeData);
+
+    // 2. Save the suggestions and update status
+    project.aiSuggestions = suggestions;
+    project.status = 'PENDING_REVIEW';
+    await project.save();
+
+    // 3. Return the suggestions so the frontend can render the "Accept/Decline" UI
+    res.status(200).json({
+      message: 'Audit complete. Pending user review.',
+      status: project.status,
+      suggestions: project.aiSuggestions
+    });
+  } catch (error) {
+    console.error('Error auditing project:', error);
+    res.status(500).json({ error: 'Internal server error while auditing project.' });
+  }
+});
+
+// PATCH: Phase 2 - Accept or Decline Suggestions
+app.patch('/api/projects/:id/suggestions', async (req: Request<{ id: string }>, res: Response) => {
+  try {
+    const { acceptedSuggestionIds } = req.body; // Expects an array of string IDs
+
+    if (!Array.isArray(acceptedSuggestionIds)) {
+      return res.status(400).json({ error: 'acceptedSuggestionIds must be an array.' });
+    }
+
+    const project = await ProjectModel.findById(req.params.id);
+
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found.' });
+    }
+
+    // Update the isAccepted flag for every suggestion
+    project.aiSuggestions = project.aiSuggestions.map(suggestion => ({
+      suggestionId: suggestion.suggestionId,
+      title: suggestion.title,
+      description: suggestion.description,
+      isAccepted: acceptedSuggestionIds.includes(suggestion.suggestionId)
+    }));
+
+    await project.save();
+
+    res.status(200).json({
+      message: 'User decisions saved.',
+      suggestions: project.aiSuggestions
+    });
+  } catch (error) {
+    console.error('Error updating suggestions:', error);
+    res.status(500).json({ error: 'Internal server error while updating suggestions.' });
+  }
+});
+
+// POST: Phase 3 - Generate the final Document
+app.post('/api/projects/:id/generate', async (req: Request<{ id: string }>, res: Response) => {
+  try {
+    const { documentType = 'PRD' } = req.body; // Default to PRD, future proofed for DESIGN_DOC
+
+    const project = await ProjectModel.findById(req.params.id);
+
+    if (!project) {
+      return res.status(404).json({ error: 'Project not found.' });
+    }
+
+    // Prevent generating the same document type twice
+    const hasAlreadyGeneratedType = project.generatedDocuments.some(
+      doc => doc.documentType === documentType
+    );
+
+    if (hasAlreadyGeneratedType) {
+      return res.status(400).json({ 
+        error: `You have already generated a ${documentType} for this project.` 
+      });
+    }
+
+    console.log(`Generating ${documentType} for: ${project.intakeData.projectName}...`);
+
+    // 1. Extract only the accepted AI suggestions
+    const acceptedFeatures = project.aiSuggestions
+      .filter(suggestion => suggestion.isAccepted === true)
+      .map(suggestion => `${suggestion.title}: ${suggestion.description}`);
+
+    // 2. Merge them with the original user requests
+    const combinedFeatures = [
+      ...project.intakeData.coreFeaturesRequired,
+      ...acceptedFeatures
+    ];
+
+    // 3. Map to the format expected by our AI service
+    const finalInput = {
+      projectName: project.intakeData.projectName,
+      clientName: project.intakeData.clientName,
+      projectGoal: project.intakeData.projectGoal,
+      targetAudience: project.intakeData.targetAudience,
+      coreFeaturesRequired: combinedFeatures
+    };
+
+    // 4. Generate the document via Gemini
+    const generatedContent = await generatePRDFromAI(finalInput);
+
+    // 5. Save the document to the array and mark the project as COMPLETED
+    project.generatedDocuments.push({
+      documentType: documentType as any,
+      content: generatedContent,
+      generatedAt: new Date()
+    });
+    
+    project.status = 'COMPLETED';
+    await project.save();
+
+    res.status(200).json({
+      message: `${documentType} generated successfully.`,
+      status: project.status,
+      document: generatedContent
+    });
+  } catch (error) {
+    console.error('Error generating document:', error);
+    res.status(500).json({ error: 'Internal server error while generating document.' });
+  }
 });
 
 // POST: Generate PRD and Save to Database
