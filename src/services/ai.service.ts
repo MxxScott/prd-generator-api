@@ -122,3 +122,89 @@ export async function auditProjectWithAI(intakeData: any) {
     isAccepted: null 
   }));
 }
+
+// 1. The Design Document Schema
+const DesignDocSchema = {
+  type: SchemaType.OBJECT,
+  properties: {
+    title: { type: SchemaType.STRING },
+    architectureOverview: { type: SchemaType.STRING },
+    designSystem: {
+      type: SchemaType.OBJECT,
+      properties: {
+        colorPalette: { 
+          type: SchemaType.ARRAY, 
+          items: { type: SchemaType.STRING },
+          description: "Specific hex codes based on the client's primary color and theme style."
+        },
+        typography: { type: SchemaType.STRING, description: "Suggested font pairings." }
+      },
+      required: ["colorPalette", "typography"]
+    },
+    uiComponents: {
+      type: SchemaType.ARRAY,
+      description: "List of core React components needed for the frontend.",
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          componentName: { type: SchemaType.STRING },
+          purpose: { type: SchemaType.STRING }
+        },
+        required: ["componentName", "purpose"]
+      }
+    },
+    databaseModels: {
+      type: SchemaType.ARRAY,
+      description: "Proposed MongoDB/PostgreSQL schemas.",
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          modelName: { type: SchemaType.STRING },
+          fields: { type: SchemaType.ARRAY, items: { type: SchemaType.STRING } }
+        },
+        required: ["modelName", "fields"]
+      }
+    },
+    apiEndpoints: {
+      type: SchemaType.ARRAY,
+      items: {
+        type: SchemaType.OBJECT,
+        properties: {
+          method: { type: SchemaType.STRING, enum: ["GET", "POST", "PUT", "PATCH", "DELETE"] },
+          route: { type: SchemaType.STRING },
+          description: { type: SchemaType.STRING }
+        },
+        required: ["method", "route", "description"]
+      }
+    }
+  },
+  required: ["title", "architectureOverview", "designSystem", "uiComponents", "databaseModels", "apiEndpoints"]
+};
+
+// 2. The Design Document Generation Function
+export async function generateDesignDocFromAI(input: any) {
+  const model = genAI.getGenerativeModel({
+    model: 'gemini-3.5-flash',
+    generationConfig: {
+      responseMimeType: "application/json",
+      responseSchema: DesignDocSchema,
+    }
+  });
+
+  const prompt = `
+    You are an elite Software Architect and UI/UX Lead.
+    Generate a comprehensive Systems Architecture and Design Document based on the following finalized client requirements.
+
+    Here is the approved project scope and design preferences:
+    ${JSON.stringify(input, null, 2)}
+
+    Output a highly technical document outlining the database models, REST API endpoints, key frontend UI components, and the foundational design system (colors, typography) matching their aesthetic preferences.
+  `;
+
+  console.log('Sending Design Doc prompt to Gemini...');
+  const result = await model.generateContent(prompt);
+  const responseText = result.response.text();
+  console.log('Design Doc Generated Successfully✔');
+  
+  return JSON.parse(responseText);
+}

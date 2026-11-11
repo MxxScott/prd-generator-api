@@ -4,9 +4,9 @@ import cors from 'cors';
 import { type ClientDiscoveryInput } from './types/index.js';
 import { connectDB } from './config/db.js';
 import { PRDModel } from './models/prd.model.js';
-import { generateMarkdownPRD } from './utils/markdown.util.js';
 import { ProjectModel } from './models/project.model.js';
-import { generatePRDFromAI, auditProjectWithAI } from './services/ai.service.js';
+import { generatePRDFromAI, auditProjectWithAI, generateDesignDocFromAI } from './services/ai.service.js';
+import { generateMarkdownPRD, generateDesignDocMarkdown} from './utils/markdown.util.js';
 
 const app = express();
 const PORT = process.env.PORT || 5000;
@@ -161,17 +161,24 @@ app.post('/api/projects/:id/generate', async (req: Request<{ id: string }>, res:
       ...acceptedFeatures
     ];
 
-    // 3. Map to the format expected by our AI service
+    // 3. Map to the format expected by our AI service (Now including designPreferences!)
     const finalInput = {
       projectName: project.intakeData.projectName,
       clientName: project.intakeData.clientName,
       projectGoal: project.intakeData.projectGoal,
       targetAudience: project.intakeData.targetAudience,
+      designPreferences: project.intakeData.designPreferences, // Crucial for the Design Doc
       coreFeaturesRequired: combinedFeatures
     };
 
-    // 4. Generate the document via Gemini
-    const generatedContent = await generatePRDFromAI(finalInput);
+    // 4. Generate the document via Gemini based on the requested type
+    let generatedContent;
+    if (documentType === 'DESIGN_DOC') {
+      generatedContent = await generateDesignDocFromAI(finalInput);
+    } else {
+      // Default fallback is the PRD
+      generatedContent = await generatePRDFromAI(finalInput);
+    }
 
     // 5. Save the document to the array and mark the project as COMPLETED
     project.generatedDocuments.push({
@@ -183,10 +190,19 @@ app.post('/api/projects/:id/generate', async (req: Request<{ id: string }>, res:
     project.status = 'COMPLETED';
     await project.save();
 
+    // Generate the markdown string based on the document type
+    let markdownOutput = '';
+    if (documentType === 'DESIGN_DOC') {
+      markdownOutput = generateDesignDocMarkdown(generatedContent);
+    } else {
+      markdownOutput = generateMarkdownPRD(finalInput, generatedContent);
+    }
+
     res.status(200).json({
       message: `${documentType} generated successfully.`,
       status: project.status,
-      document: generatedContent
+      document: generatedContent, // The raw JSON for UI rendering
+      markdown: markdownOutput    // The formatted string for downloading
     });
   } catch (error) {
     console.error('Error generating document:', error);
