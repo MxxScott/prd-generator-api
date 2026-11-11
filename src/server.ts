@@ -9,6 +9,7 @@ import { generatePRDFromAI, auditProjectWithAI, generateDesignDocFromAI } from '
 import { generateMarkdownPRD, generateDesignDocMarkdown} from './utils/markdown.util.js';
 
 const app = express();
+app.use(cors());
 const PORT = process.env.PORT || 5000;
 
 app.use(cors());
@@ -137,14 +138,34 @@ app.post('/api/projects/:id/generate', async (req: Request<{ id: string }>, res:
       return res.status(404).json({ error: 'Project not found.' });
     }
 
-    // Prevent generating the same document type twice
-    const hasAlreadyGeneratedType = project.generatedDocuments.some(
-      doc => doc.documentType === documentType
-    );
+    // Check if we already generated this document type
+    const existingDoc = project.generatedDocuments.find(doc => doc.documentType === documentType);
+    
+    if (existingDoc) {
+      console.log(`Document ${documentType} already exists. Returning from database.`);
+      
+      // Re-generate the markdown string from the saved JSON
+      let markdownOutput = '';
+      if (documentType === 'DESIGN_DOC') {
+        markdownOutput = generateDesignDocMarkdown(existingDoc.content);
+      } else if (documentType === 'PRD') {
+        // We recreate finalInput on the fly for the PRD markdown utility
+        const acceptedFeatures = project.aiSuggestions.filter(s => s.isAccepted).map(s => `${s.title}: ${s.description}`);
+        const finalInput = {
+          projectName: project.intakeData.projectName,
+          clientName: project.intakeData.clientName,
+          projectGoal: project.intakeData.projectGoal,
+          targetAudience: project.intakeData.targetAudience,
+          coreFeaturesRequired: [...project.intakeData.coreFeaturesRequired, ...acceptedFeatures]
+        };
+        markdownOutput = generateMarkdownPRD(finalInput, existingDoc.content); 
+      }
 
-    if (hasAlreadyGeneratedType) {
-      return res.status(400).json({ 
-        error: `You have already generated a ${documentType} for this project.` 
+      return res.status(200).json({
+        message: `${documentType} retrieved successfully from database.`,
+        status: project.status,
+        document: existingDoc.content,
+        markdown: markdownOutput
       });
     }
 
